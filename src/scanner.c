@@ -1,6 +1,8 @@
 #include "tree_sitter/array.h"
 #include "tree_sitter/parser.h"
 
+#include <string.h>
+
 #define _str(x) #x
 #define _file(x) _str(schema.x.c)
 
@@ -162,26 +164,25 @@ typedef struct {
     ResultSchema rlt_sch;
 } Scanner;
 
+// Each field is copied with memcpy at its own width: the buffer is a char
+// array, so a store or load through a wider pointer may be misaligned.
+#define SER_PUT(VAL) (memcpy(&buffer[size], &(VAL), sizeof(VAL)), size += sizeof(VAL))
+#define SER_GET(VAL) (memcpy(&(VAL), &buffer[size], sizeof(VAL)), size += sizeof(VAL))
+
 static unsigned serialize(Scanner *scanner, char *buffer) {
     size_t size = 0;
-    *(int32_t *)&buffer[size] = scanner->row;
-    size += sizeof(int32_t);
-    *(int16_t *)&buffer[size] = scanner->col;
-    size += sizeof(int16_t);
-    *(int32_t *)&buffer[size] = scanner->blk_imp_row;
-    size += sizeof(int32_t);
-    *(int16_t *)&buffer[size] = scanner->blk_imp_col;
-    size += sizeof(int16_t);
-    *(int16_t *)&buffer[size] = scanner->blk_imp_tab;
-    size += sizeof(int16_t);
+    SER_PUT(scanner->row);
+    SER_PUT(scanner->col);
+    SER_PUT(scanner->blk_imp_row);
+    SER_PUT(scanner->blk_imp_col);
+    SER_PUT(scanner->blk_imp_tab);
     int16_t *typ_itr = scanner->ind_typ_stk.contents + 1;
     int16_t *typ_end = scanner->ind_typ_stk.contents + scanner->ind_typ_stk.size;
     int16_t *len_itr = scanner->ind_len_stk.contents + 1;
-    for (; typ_itr != typ_end && size + 2 * sizeof(int16_t) <= TREE_SITTER_SERIALIZATION_BUFFER_SIZE; ++typ_itr, ++len_itr) {
-        *(int16_t *)&buffer[size] = *typ_itr;
-        size += sizeof(int16_t);
-        *(int16_t *)&buffer[size] = *len_itr;
-        size += sizeof(int16_t);
+    for (; typ_itr != typ_end && size + sizeof(*typ_itr) + sizeof(*len_itr) <= TREE_SITTER_SERIALIZATION_BUFFER_SIZE;
+         ++typ_itr, ++len_itr) {
+        SER_PUT(*typ_itr);
+        SER_PUT(*len_itr);
     }
     return size;
 }
@@ -198,25 +199,24 @@ static void deserialize(Scanner *scanner, const char *buffer, unsigned length) {
     array_push(&scanner->ind_len_stk, -1);
     if (length > 0) {
         size_t size = 0;
-        scanner->row = *(int32_t *)&buffer[size];
-        size += sizeof(int32_t);
-        scanner->col = *(int16_t *)&buffer[size];
-        size += sizeof(int16_t);
-        scanner->blk_imp_row = *(int32_t *)&buffer[size];
-        size += sizeof(int32_t);
-        scanner->blk_imp_col = *(int16_t *)&buffer[size];
-        size += sizeof(int16_t);
-        scanner->blk_imp_tab = *(int16_t *)&buffer[size];
-        size += sizeof(int16_t);
+        SER_GET(scanner->row);
+        SER_GET(scanner->col);
+        SER_GET(scanner->blk_imp_row);
+        SER_GET(scanner->blk_imp_col);
+        SER_GET(scanner->blk_imp_tab);
         while (size < length) {
-            array_push(&scanner->ind_typ_stk, *(int16_t *)&buffer[size]);
-            size += sizeof(int16_t);
-            array_push(&scanner->ind_len_stk, *(int16_t *)&buffer[size]);
-            size += sizeof(int16_t);
+            int16_t typ, len;
+            SER_GET(typ);
+            SER_GET(len);
+            array_push(&scanner->ind_typ_stk, typ);
+            array_push(&scanner->ind_len_stk, len);
         }
         assert(size == length);
     }
 }
+
+#undef SER_PUT
+#undef SER_GET
 
 static inline void adv(Scanner *scanner, TSLexer *lexer) {
     scanner->cur_col++;
